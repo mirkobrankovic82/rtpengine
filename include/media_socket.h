@@ -252,6 +252,7 @@ struct stream_fd {
 	unsigned int			users;
 
 	bool				kernelized:1,
+					tc_offloaded:1,
 					confirmed:1;
 };
 

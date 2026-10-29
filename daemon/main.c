@@ -58,6 +58,7 @@
 #include "mqtt.h"
 #include "janus.h"
 #include "nftables.h"
+#include "tc_offload.h"
 #include "bufferpool.h"
 #include "uring.h"
 #include "ng_client.h"
@@ -786,6 +787,9 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		{ "nftables-stop",0, 0, G_OPTION_ARG_NONE,	&nftables_stop,			"Just remove nftables rules and exit", NULL },
 		{ "nftables-status",0, 0, G_OPTION_ARG_NONE,	&nftables_status,		"Check nftables rules, print result and exit", NULL },
 #endif
+		{ "tc-offload",	0, 0, G_OPTION_ARG_NONE,	&rtpe_config.tc_offload,	"Enable eBPF TC plaintext UDP offload", NULL },
+		{ "tc-offload-interfaces", 0, 0, G_OPTION_ARG_STRING, &rtpe_config.tc_offload_interfaces,
+										"Comma-separated interfaces for TC attach", "IFACES" },
 		{ "interface",	'i', 0, G_OPTION_ARG_STRING_ARRAY,&if_a,	"Local interface for RTP",	"[NAME/]IP[!IP]"},
 		{ "interfaces-config",0,0, G_OPTION_ARG_STRING, &interfaces_config,	"Config section prefix for interfaces",			"STR"},
 		{ "templates", 0, 0,	G_OPTION_ARG_STRING,	&templates_section,	"Config section to read signalling templates from ",	"STR"},
@@ -1029,6 +1033,15 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 				},
 				{ 0 },
 			});
+
+	{
+		const char *env = getenv("RTPENGINE_TC_OFFLOAD");
+		if (env && env[0] && env[0] != '0' && strcasecmp(env, "false") && strcasecmp(env, "no"))
+			rtpe_config.tc_offload = true;
+		env = getenv("RTPENGINE_TC_OFFLOAD_INTERFACES");
+		if (env && env[0] && !rtpe_config.tc_offload_interfaces)
+			rtpe_config.tc_offload_interfaces = g_strdup(env);
+	}
 
 	// default values, if not configured
 	if (rtpe_config.rec_method == NULL)
@@ -1832,6 +1845,8 @@ static void init_everything(charp_ht templates) {
 	ice_init();
 	crypto_init_main();
 	kernel_setup();
+	if (!tc_offload_init())
+		ilog(LOG_ERR, "TC offload init failed; continuing without it");
 	interfaces_init(&rtpe_config.interfaces);
 	iptables_init();
 	control_ng_init();
@@ -2258,6 +2273,7 @@ int main(int argc, char **argv) {
 	ng_client_cleanup();
 	bufferpool_destroy(shm_bufferpool);
 	bufferpool_destroy(static_bufferpool);
+	tc_offload_shutdown();
 	kernel_shutdown_table();
 	options_free();
 	bufferpool_cleanup();

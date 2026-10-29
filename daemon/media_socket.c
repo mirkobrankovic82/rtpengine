@@ -8,6 +8,7 @@
 #include "rtp.h"
 #include "stun.h"
 #include "kernel.h"
+#include "tc_offload.h"
 #include "rtcp.h"
 #include "sdp.h"
 #include "log_d.h"
@@ -1997,9 +1998,22 @@ static void kernelize(struct packet_stream *stream) {
 
 	if (call->recording != NULL && !selected_recording_method->kernel_support)
 		goto no_kernel;
-	if (!kernel.is_wanted)
+	if (!kernel.is_wanted) {
+		if (tc_offload_is_active() && tc_offload_add_stream(stream)) {
+			stream->kernel_time_us = rtpe_now;
+			stream->selected_sfd->kernelized = true;
+			stream->selected_sfd->tc_offloaded = true;
+			return;
+		}
 		goto no_kernel;
+	}
 	if (!kernel.is_open) {
+		if (tc_offload_is_active() && tc_offload_add_stream(stream)) {
+			stream->kernel_time_us = rtpe_now;
+			stream->selected_sfd->kernelized = true;
+			stream->selected_sfd->tc_offloaded = true;
+			return;
+		}
 		ilog(LOG_WARNING, "No support for kernel packet forwarding available "
 				"(interface to kernel module not open)");
 		goto no_kernel;
@@ -2130,7 +2144,14 @@ void __unkernelize(struct packet_stream *p, const char *reason) {
 	if (!sfd->kernelized)
 		return;
 
-	if (kernel.is_open && !no_supp) {
+	if (sfd->tc_offloaded) {
+		ilog(LOG_INFO, "Removing media stream from TC offload: local %s (%s)",
+				endpoint_print_buf(&sfd->socket.local),
+				reason);
+		tc_offload_del_stream(p);
+		sfd->tc_offloaded = false;
+	}
+	else if (kernel.is_open && !no_supp) {
 		ilog(LOG_INFO, "Removing media stream from kernel: local %s (%s)",
 				endpoint_print_buf(&sfd->socket.local),
 				reason);
