@@ -42,6 +42,19 @@ ifeq ($(without_nftables),yes)
 CFLAGS += -DWITHOUT_NFTABLES
 endif
 
+# TC/eBPF offload (Linux + libbpf). Override with with_tc_offload=yes|no
+ifeq ($(with_tc_offload),)
+  ifeq ($(shell uname -s),Linux)
+    ifeq ($(shell pkg-config --exists libbpf && echo yes),yes)
+      with_tc_offload := yes
+    endif
+  endif
+endif
+ifeq ($(with_tc_offload),yes)
+CFLAGS += -DHAVE_TC_OFFLOAD $(shell pkg-config --cflags libbpf)
+LDLIBS += $(shell pkg-config --libs libbpf)
+endif
+
 ### compile time options:
 #CFLAGS += -DSRTCP_KEY_DERIVATION_RFC_COMPLIANCE
 #CFLAGS += -DSTRICT_SDES_KEY_LIFETIME
@@ -91,10 +104,11 @@ SRCS := main.c kernel.c helpers.c control_tcp.c call.c control_udp.c redis.c \
 		media_socket.c homer.c recording.c statistics.c cdr.c ssrc.c iptables.c tcp_listener.c \
 		codec.c load.c dtmf.c timerthread.c media_player.c jitter_buffer.c t38.c websocket.c \
 		mqtt.c janus.strhash.c audio_player.c memory_arena.c ng_client.c call_flags.strhash.c \
-		common.c
+		common.c tc_offload.c
 ifneq ($(without_nftables),yes)
 SRCS += nftables.c
 endif
+
 LIBSRCS := loglib.c auxlib.c rtplib.c str.c socket.c streambuf.c ssllib.c dtmflib.c mix_buffer.c poller.c \
 		bufferpool.c bencode.c netfilter_api.c
 LIBSRCS += arena.c
@@ -113,6 +127,45 @@ MANS := $(MDS:.ronn=.8)
 
 include ../lib/common.Makefile
 
+ifeq ($(with_tc_offload),yes)
+EBPF_DIR := ebpf
+EBPF_OBJ := $(EBPF_DIR)/rtpengine_tc.bpf.o
+CLANG ?= clang
+# Map uname -m to libbpf __TARGET_ARCH_* names
+BPF_UNAME_M := $(shell uname -m)
+ifeq ($(BPF_UNAME_M),x86_64)
+BPF_ARCH := x86
+else ifeq ($(BPF_UNAME_M),i386)
+BPF_ARCH := x86
+else ifeq ($(BPF_UNAME_M),i686)
+BPF_ARCH := x86
+else ifeq ($(BPF_UNAME_M),aarch64)
+BPF_ARCH := arm64
+else ifeq ($(BPF_UNAME_M),arm64)
+BPF_ARCH := arm64
+else ifneq ($(filter arm%,$(BPF_UNAME_M)),)
+BPF_ARCH := arm
+else ifeq ($(BPF_UNAME_M),ppc64le)
+BPF_ARCH := powerpc
+else ifeq ($(BPF_UNAME_M),s390x)
+BPF_ARCH := s390
+else ifeq ($(BPF_UNAME_M),riscv64)
+BPF_ARCH := riscv
+else
+BPF_ARCH := $(BPF_UNAME_M)
+endif
+BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_$(BPF_ARCH) -I$(EBPF_DIR) -I.
+ADD_CLEAN += $(EBPF_OBJ)
+
+$(EBPF_OBJ): $(EBPF_DIR)/rtpengine_tc.bpf.c $(EBPF_DIR)/rtpengine_tc.h $(EBPF_DIR)/vmlinux_stub.h
+	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
+
+$(TARGET): $(EBPF_OBJ)
+endif
+
 install: $(TARGET) $(MANS)
 	install -m 0755 -D $(TARGET) $(DESTDIR)/usr/bin/$(TARGET)
 	install -m 0644 -D $(TARGET).8 $(DESTDIR)/usr/share/man/man8/$(TARGET).8
+ifeq ($(with_tc_offload),yes)
+	install -m 0644 -D $(EBPF_OBJ) $(DESTDIR)/usr/libexec/rtpengine/rtpengine_tc.bpf.o
+endif

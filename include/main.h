@@ -144,6 +144,7 @@ enum endpoint_learning {
 	X(evs_cn_dtx) \
 	X(moh_prevent_double_hold) \
 	X(lightweight) \
+	X(tc_offload) \
 
 #define RTPE_CONFIG_CHARP_PARAMS \
 	X(b2b_url) \
@@ -182,6 +183,7 @@ enum endpoint_learning {
 	X(mqtt_publish_topic) \
 	X(janus_secret) \
 	X(db_media_cache) \
+	X(tc_offload_interfaces) \
 
 #define RTPE_CONFIG_ENDPOINT_PARAMS \
 	X(graphite_ep) \
