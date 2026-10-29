@@ -1845,8 +1845,10 @@ static void init_everything(charp_ht templates) {
 	ice_init();
 	crypto_init_main();
 	kernel_setup();
-	if (!tc_offload_init())
-		ilog(LOG_ERR, "TC offload init failed; continuing without it");
+	if (!tc_offload_init()) {
+		if (rtpe_config.tc_offload)
+			die("TC offload was requested but failed to initialize");
+	}
 	interfaces_init(&rtpe_config.interfaces);
 	iptables_init();
 	control_ng_init();

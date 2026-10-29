@@ -9,6 +9,7 @@
 
 #include <glib.h>
 
+#include "auxlib.h"
 #include "call.h"
 #include "log.h"
 #include "main.h"
@@ -31,9 +32,15 @@ static bool tc_active;
 
 #ifdef RTPE_TC_IMPL
 
+/* Distinctive filter id so we do not collide with common handle=1 demos. */
+#define RTPE_TC_HANDLE    0x72740001
+#define RTPE_TC_PRIORITY  200
+
 static struct bpf_object *tc_obj;
 static int flows_fd = -1;
 static GArray *attached_ifs;
+static GHashTable *ifindex_cache; /* guint ipv4 -> gint ifindex */
+static mutex_t ifindex_lock = MUTEX_STATIC_INIT;
 
 static int libbpf_print(enum libbpf_print_level level, const char *fmt, va_list ap) {
 	if (level >= LIBBPF_DEBUG)
@@ -65,7 +72,7 @@ static void ep_to_re(struct re_address *o, const endpoint_t *ep) {
 	ep->address.family->endpoint2kernel(o, ep);
 }
 
-static int ifindex_for_addr(const struct re_address *local) {
+static int ifindex_lookup_uncached(const struct re_address *local) {
 	struct ifaddrs *ifa = NULL, *p;
 	int idx = 0;
 
@@ -93,6 +100,25 @@ static int ifindex_for_addr(const struct re_address *local) {
 	return idx;
 }
 
+static int ifindex_for_addr(const struct re_address *local) {
+	if (local->family != AF_INET)
+		return ifindex_lookup_uncached(local);
+
+	LOCK(&ifindex_lock);
+	if (ifindex_cache) {
+		gpointer cached = g_hash_table_lookup(ifindex_cache, GUINT_TO_POINTER(local->u.ipv4));
+		if (cached) {
+			int idx = GPOINTER_TO_INT(cached);
+			return idx;
+		}
+	}
+
+	int idx = ifindex_lookup_uncached(local);
+	if (idx && ifindex_cache)
+		g_hash_table_insert(ifindex_cache, GUINT_TO_POINTER(local->u.ipv4), GINT_TO_POINTER(idx));
+	return idx;
+}
+
 static int attach_iface(const char *ifname) {
 	int ifindex = if_nametoindex(ifname);
 	if (!ifindex) {
@@ -117,11 +143,20 @@ static int attach_iface(const char *ifname) {
 	}
 
 	LIBBPF_OPTS(bpf_tc_opts, opts,
-		.handle = 1,
-		.priority = 1,
+		.handle = RTPE_TC_HANDLE,
+		.priority = RTPE_TC_PRIORITY,
 		.prog_fd = bpf_program__fd(prog),
 	);
 	err = bpf_tc_attach(&hook, &opts);
+	if (err == -EEXIST) {
+		/* Stale filter from a previous run — replace by detach + attach. */
+		LIBBPF_OPTS(bpf_tc_opts, detach_opts,
+			.handle = RTPE_TC_HANDLE,
+			.priority = RTPE_TC_PRIORITY,
+		);
+		bpf_tc_detach(&hook, &detach_opts);
+		err = bpf_tc_attach(&hook, &opts);
+	}
 	if (err) {
 		ilog(LOG_ERR, "TC offload: bpf_tc_attach(%s): %s", ifname, strerror(-err));
 		return -1;
@@ -142,11 +177,11 @@ static void detach_all(void) {
 			.attach_point = BPF_TC_INGRESS,
 		);
 		LIBBPF_OPTS(bpf_tc_opts, opts,
-			.handle = 1,
-			.priority = 1,
+			.handle = RTPE_TC_HANDLE,
+			.priority = RTPE_TC_PRIORITY,
 		);
+		/* Only detach our filter — do not destroy clsact (may be shared). */
 		bpf_tc_detach(&hook, &opts);
-		bpf_tc_hook_destroy(&hook);
 	}
 	g_array_set_size(attached_ifs, 0);
 }
@@ -166,7 +201,7 @@ bool tc_offload_init(void) {
 
 	const char *path = default_obj_path();
 	tc_obj = bpf_object__open_file(path, NULL);
-	if (libbpf_get_error(tc_obj)) {
+	if (!tc_obj || libbpf_get_error(tc_obj)) {
 		ilog(LOG_ERR, "TC offload: cannot open BPF object '%s': %s",
 				path, strerror(errno));
 		tc_obj = NULL;
@@ -189,27 +224,37 @@ bool tc_offload_init(void) {
 	}
 	flows_fd = bpf_map__fd(map);
 	attached_ifs = g_array_new(false, false, sizeof(int));
+	ifindex_cache = g_hash_table_new(g_direct_hash, g_direct_equal);
 
-	if (rtpe_config.tc_offload_interfaces && rtpe_config.tc_offload_interfaces[0]) {
-		char **ifaces = g_strsplit_set(rtpe_config.tc_offload_interfaces, ", \t", -1);
-		for (char **i = ifaces; i && *i; i++) {
-			if (!**i)
-				continue;
-			if (attach_iface(*i)) {
-				g_strfreev(ifaces);
-				tc_offload_shutdown();
-				return false;
-			}
-		}
-		g_strfreev(ifaces);
+	if (!rtpe_config.tc_offload_interfaces || !rtpe_config.tc_offload_interfaces[0]) {
+		ilog(LOG_ERR, "TC offload: --tc-offload-interfaces / "
+				"RTPENGINE_TC_OFFLOAD_INTERFACES is required");
+		tc_offload_shutdown();
+		return false;
 	}
-	else {
-		ilog(LOG_WARNING, "TC offload: no interfaces set "
-				"(--tc-offload-interfaces / RTPENGINE_TC_OFFLOAD_INTERFACES)");
+
+	char **ifaces = g_strsplit_set(rtpe_config.tc_offload_interfaces, ", \t", -1);
+	guint attached = 0;
+	for (char **i = ifaces; i && *i; i++) {
+		if (!**i)
+			continue;
+		if (attach_iface(*i)) {
+			g_strfreev(ifaces);
+			tc_offload_shutdown();
+			return false;
+		}
+		attached++;
+	}
+	g_strfreev(ifaces);
+
+	if (!attached) {
+		ilog(LOG_ERR, "TC offload: no interfaces attached");
+		tc_offload_shutdown();
+		return false;
 	}
 
 	tc_active = true;
-	ilog(LOG_INFO, "TC offload: active");
+	ilog(LOG_INFO, "TC offload: active on %u interface(s)", attached);
 	return true;
 }
 
@@ -218,6 +263,13 @@ void tc_offload_shutdown(void) {
 	if (attached_ifs) {
 		g_array_free(attached_ifs, true);
 		attached_ifs = NULL;
+	}
+	{
+		LOCK(&ifindex_lock);
+		if (ifindex_cache) {
+			g_hash_table_destroy(ifindex_cache);
+			ifindex_cache = NULL;
+		}
 	}
 	if (tc_obj) {
 		bpf_object__close(tc_obj);
@@ -235,6 +287,23 @@ static bool flow_is_plaintext(const struct rtpengine_srtp *dec, const struct rtp
 	if (enc->cipher != REC_NULL || enc->hmac != REH_NULL)
 		return false;
 	return true;
+}
+
+static void flush_flow_stats(struct packet_stream *stream, const struct rtpengine_tc_key *key) {
+	struct rtpengine_tc_flow flow = {0};
+	if (bpf_map_lookup_elem(flows_fd, key, &flow))
+		return;
+	if (!flow.packets && !flow.bytes)
+		return;
+	if (stream->stats_in) {
+		atomic64_add_na(&stream->stats_in->packets, flow.packets);
+		atomic64_add_na(&stream->stats_in->bytes, flow.bytes);
+	}
+	if (stream->selected_sfd && stream->selected_sfd->local_intf
+			&& stream->selected_sfd->local_intf->stats) {
+		atomic64_add_na(&stream->selected_sfd->local_intf->stats->in.packets, flow.packets);
+		atomic64_add_na(&stream->selected_sfd->local_intf->stats->in.bytes, flow.bytes);
+	}
 }
 
 bool tc_offload_add_stream(struct packet_stream *stream) {
@@ -319,6 +388,7 @@ void tc_offload_del_stream(struct packet_stream *stream) {
 
 	struct rtpengine_tc_key key = {0};
 	re_to_tc_addr(&key.local, &local);
+	flush_flow_stats(stream, &key);
 	bpf_map_delete_elem(flows_fd, &key);
 	ilog(LOG_INFO, "TC offload: removed local %s",
 			endpoint_print_buf(&stream->selected_sfd->socket.local));

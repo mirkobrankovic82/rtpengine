@@ -131,7 +131,30 @@ ifeq ($(with_tc_offload),yes)
 EBPF_DIR := ebpf
 EBPF_OBJ := $(EBPF_DIR)/rtpengine_tc.bpf.o
 CLANG ?= clang
-BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_x86 -I$(EBPF_DIR) -I.
+# Map uname -m to libbpf __TARGET_ARCH_* names
+BPF_UNAME_M := $(shell uname -m)
+ifeq ($(BPF_UNAME_M),x86_64)
+BPF_ARCH := x86
+else ifeq ($(BPF_UNAME_M),i386)
+BPF_ARCH := x86
+else ifeq ($(BPF_UNAME_M),i686)
+BPF_ARCH := x86
+else ifeq ($(BPF_UNAME_M),aarch64)
+BPF_ARCH := arm64
+else ifeq ($(BPF_UNAME_M),arm64)
+BPF_ARCH := arm64
+else ifneq ($(filter arm%,$(BPF_UNAME_M)),)
+BPF_ARCH := arm
+else ifeq ($(BPF_UNAME_M),ppc64le)
+BPF_ARCH := powerpc
+else ifeq ($(BPF_UNAME_M),s390x)
+BPF_ARCH := s390
+else ifeq ($(BPF_UNAME_M),riscv64)
+BPF_ARCH := riscv
+else
+BPF_ARCH := $(BPF_UNAME_M)
+endif
+BPF_CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_$(BPF_ARCH) -I$(EBPF_DIR) -I.
 ADD_CLEAN += $(EBPF_OBJ)
 
 $(EBPF_OBJ): $(EBPF_DIR)/rtpengine_tc.bpf.c $(EBPF_DIR)/rtpengine_tc.h $(EBPF_DIR)/vmlinux_stub.h

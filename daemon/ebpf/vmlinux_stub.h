@@ -20,6 +20,12 @@ typedef __u32 __be32;
 #ifndef ETH_P_IP
 #define ETH_P_IP 0x0800
 #endif
+#ifndef ETH_P_8021Q
+#define ETH_P_8021Q 0x8100
+#endif
+#ifndef ETH_P_8021AD
+#define ETH_P_8021AD 0x88A8
+#endif
 
 #ifndef IPPROTO_UDP
 #define IPPROTO_UDP 17
@@ -28,6 +34,7 @@ typedef __u32 __be32;
 #ifndef TC_ACT_OK
 #define TC_ACT_OK 0
 #define TC_ACT_SHOT 2
+#define TC_ACT_REDIRECT 7
 #endif
 
 #ifndef BPF_F_PSEUDO_HDR

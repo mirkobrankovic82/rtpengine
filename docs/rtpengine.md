@@ -159,20 +159,22 @@ at the command line. See the __\-\-config-file__ option below for details.
 
 - __\-\-tc-offload__
 
-    Enable eBPF/TC plaintext UDP forwarding when the nftables kernel module is
-    not in use (`table` &lt; 0). SRTP and other non-passthrough streams stay in
-    userspace. Also enabled when the environment variable
-    __RTPENGINE_TC_OFFLOAD__ is set to a non-empty value other than
-    `0`/`false`/`no`. Requires a Linux build with libbpf
-    (`with_tc_offload=yes`) and the BPF object at
-    `/usr/libexec/rtpengine/rtpengine_tc.bpf.o` (override with
-    __RTPENGINE_TC_OFFLOAD_OBJ__).
+    Enable eBPF/TC plaintext UDP forwarding when the nftables kernel module
+    path is unavailable (`table` &lt; 0, or the module/table failed to open).
+    SRTP, ICE, DTLS, and other non-passthrough streams stay in userspace.
+    Also enabled when the environment variable __RTPENGINE_TC_OFFLOAD__ is set
+    to a non-empty value other than `0`/`false`/`no`. Requires a Linux build
+    with libbpf (`with_tc_offload=yes`), Linux 5.10+ (`bpf_redirect_neigh`),
+    the BPF object at `/usr/libexec/rtpengine/rtpengine_tc.bpf.o` (override
+    with __RTPENGINE_TC_OFFLOAD_OBJ__, for example a path under the build
+    tree when running uninstalled), and __\-\-tc-offload-interfaces__. Startup
+    fails if offload was requested but could not be initialized.
 
 - __\-\-tc-offload-interfaces=__*IFACES*
 
     Comma-separated list of network interfaces to attach the TC classifier to
-    (for example `eth0` or `ens4`). Also read from
-    __RTPENGINE_TC_OFFLOAD_INTERFACES__ if unset.
+    (for example `eth0` or `ens4`). Required when __\-\-tc-offload__ is enabled.
+    Also read from __RTPENGINE_TC_OFFLOAD_INTERFACES__ if unset.
 
 - __\-\-templates=__*STR*
 
